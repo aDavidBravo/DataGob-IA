@@ -1,0 +1,126 @@
+version: '3.9'
+
+services:
+  # ─── PostgreSQL Metadata DB ────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: datagob_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-datagob}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-DataGob2024!}
+      POSTGRES_DB: ${POSTGRES_DB:-datagob_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datagob"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - datagob_net
+
+  # ─── Redis Cache ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: datagob_redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-RedisGob2024!}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - datagob_net
+
+  # ─── MinIO (Data Lake Storage) ──────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: datagob_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-MinioGob2024!}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+    networks:
+      - datagob_net
+
+  # ─── FastAPI Backend ─────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    container_name: datagob_api
+    environment:
+      DATABASE_URL: postgresql://datagob:${POSTGRES_PASSWORD:-DataGob2024!}@postgres:5432/datagob_db
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisGob2024!}@redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-change_this_to_a_secure_secret_key_in_production}
+      MINIO_ENDPOINT: minio:9000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    networks:
+      - datagob_net
+    restart: unless-stopped
+
+  # ─── Apache Airflow ──────────────────────────────────────────────
+  airflow:
+    image: apache/airflow:2.9.1
+    container_name: datagob_airflow
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://datagob:${POSTGRES_PASSWORD:-DataGob2024!}@postgres:5432/airflow_db
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${SECRET_KEY:-airflow_secret}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/plugins/src
+      - airflow_logs:/opt/airflow/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: webserver
+    networks:
+      - datagob_net
+
+  # ─── Grafana Monitoring ──────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: datagob_grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-GrafanaGob2024!}
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards
+    networks:
+      - datagob_net
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  airflow_logs:
+  grafana_data:
+
+networks:
+  datagob_net:
+    driver: bridge
